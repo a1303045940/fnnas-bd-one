@@ -60,54 +60,55 @@ jobs:
           echo "Writing u-boot to sector 16384..."
           sudo dd if=my-boot/u-boot-rk3568-bd-one.itb of="${DEV}" seek=16384 bs=512 conv=notrunc
 
-          # 2. 挂载 Boot 分区
-          sudo mkdir -p /mnt/boot
-          MOUNT_DEV=""
-          for part in "${DEV}p1" "${DEV}p2"; do
-            if [ -b "$part" ]; then
-              if sudo mount "$part" /mnt/boot 2>/dev/null; then
-                if [ -d "/mnt/boot/extlinux" ] || [ -d "/mnt/boot/boot/extlinux" ] || [ -d "/mnt/boot/dtb" ]; then
-                  MOUNT_DEV="$part"
-                  echo "Found boot partition on ${part}"
-                  break
-                else
-                  sudo umount /mnt/boot
+          # 2. 依次遍历分区处理配置文件与 DTB
+          sudo mkdir -p /mnt/part
+          ENV_MODIFIED=false
+
+          for PART in ${DEV}p*; do
+            [ -b "$PART" ] || continue
+            
+            if sudo mount "$PART" /mnt/part 2>/dev/null; then
+              # 寻找并拷贝 DTB
+              TARGET_DTB_DIR=$(sudo find /mnt/part -type d -path "*/dtb/rockchip" 2>/dev/null | head -n 1)
+              if [ -n "$TARGET_DTB_DIR" ]; then
+                echo "Found Rockchip DTB dir at: $TARGET_DTB_DIR"
+                sudo cp -fv dtb/rk3568-bd-one.dtb "$TARGET_DTB_DIR/"
+                
+                # 双保险：同时将原版 rk3568-hnas.dtb 直接覆盖为你板子的内容
+                if [ -f "$TARGET_DTB_DIR/rk3568-hnas.dtb" ]; then
+                  echo "Overwriting rk3568-hnas.dtb directly..."
+                  sudo cp -fv dtb/rk3568-bd-one.dtb "$TARGET_DTB_DIR/rk3568-hnas.dtb"
                 fi
               fi
+
+              # 寻找并修改 fnEnv.txt
+              ENV_FILE=$(sudo find /mnt/part -name "fnEnv.txt" 2>/dev/null | head -n 1)
+              if [ -n "$ENV_FILE" ]; then
+                echo "Found fnEnv.txt at: $ENV_FILE"
+                
+                # 正则替换 fdtfile 字段为你的目标设备树
+                sudo sed -i -E "s|^fdtfile=.*|fdtfile=rockchip/rk3568-bd-one.dtb|g" "$ENV_FILE"
+                
+                echo "Modified fnEnv.txt result:"
+                cat "$ENV_FILE"
+                ENV_MODIFIED=true
+              fi
+
+              sync
+              sudo umount /mnt/part
             fi
           done
 
-          if [ -z "$MOUNT_DEV" ]; then
-            echo "Direct search failed, mounting ${DEV}p1 as fallback..."
-            sudo mount "${DEV}p1" /mnt/boot
-            MOUNT_DEV="${DEV}p1"
-          fi
-
-          # 3. 查找并替换 DTB
-          DTB_DIR=$(sudo find /mnt/boot -type d -path "*/dtb/rockchip" 2>/dev/null | head -n 1)
-          if [ -z "$DTB_DIR" ]; then
-            DTB_DIR="/mnt/boot/dtb/rockchip"
-            sudo mkdir -p "$DTB_DIR"
-          fi
-          echo "Copying DTB to: $DTB_DIR"
-          sudo cp -fv dtb/rk3568-bd-one.dtb "$DTB_DIR/"
-
-          # 4. 修改 extlinux.conf 中的设备树指向
-          CONF_FILE=$(sudo find /mnt/boot -name "extlinux.conf" 2>/dev/null | head -n 1)
-          if [ -n "$CONF_FILE" ]; then
-            echo "Updating $CONF_FILE ..."
-            sudo sed -i -E "s|^([[:space:]]*fdt[[:space:]]+).*|\1/dtb/rockchip/rk3568-bd-one.dtb|g" "$CONF_FILE"
-            echo "Modified extlinux.conf:"
-            cat "$CONF_FILE"
-          else
-            echo "Warning: extlinux.conf not found. Ensure DTB is picked up correctly."
-          fi
-
-          # 5. 清理挂载与回环
-          sync
-          sudo umount /mnt/boot
           sudo losetup -d "${DEV}"
 
+          # 3. 校验执行结果
+          if [ "$ENV_MODIFIED" = true ]; then
+            echo "✅ 成功修改 fnEnv.txt 并完成设备树注入！"
+          else
+            echo "❌ 警告: 未在任何分区中匹配到 fnEnv.txt，请检查分区挂载情况！"
+            exit 1
+          fi
+          
       - name: Compress Patched Image
         run: |
           TARGET_NAME="fnos_1.2.0302_${{ inputs.target_board }}_rk3568.img"
