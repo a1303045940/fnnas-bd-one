@@ -447,6 +447,7 @@ jobs:
 
               [[ -z "${latest_version}" || "${latest_version}" == "null" ]] && {
               echo "Error: Failed to resolve FnNAS image download URL."
+              exit 1
               }
 
               latest_url="$(echo ${latest_version} | jq -r '.url')"
@@ -471,12 +472,9 @@ jobs:
           # 供 workflow workspace 与本地 FnNAS action 读取同一份基础镜像
           # 将同一份基础镜像暴露给调用者 workspace 与本地 FnNAS action
           ln -sfn /builder/fnnas "${GITHUB_WORKSPACE}/fnnas"
-          ln -sfn /builder/fnnas "${GITHUB_WORKSPACE}/fnnas-action/fnnas"
 
           echo "===== 基础镜像软链接 ====="
-          ls -ld \
-            "${GITHUB_WORKSPACE}/fnnas" \
-            "${GITHUB_WORKSPACE}/fnnas-action/fnnas"
+          ls -ld "${GITHUB_WORKSPACE}/fnnas"
 
           echo "===== 已下载的基础镜像 ====="
           find -L "${GITHUB_WORKSPACE}/fnnas" \
