@@ -112,19 +112,25 @@ jobs:
 
           echo "===== 校验 idbloader raw 写入 ====="
           IDB_SIZE="$(stat -c '%s' "${SRC_IDB}")"
-          IDB_BLOCKS=$(( (IDB_SIZE + 511) / 512 ))
 
           sha256sum "${SRC_IDB}"
-          sudo dd if="${DEV}" bs=512 skip=64 count="${IDB_BLOCKS}" status=none | \
-            head -c "${IDB_SIZE}" | sha256sum
+          sudo dd if="${DEV}" \
+            bs=1 \
+            iflag=skip_bytes,count_bytes \
+            skip=$((64 * 512)) \
+            count="${IDB_SIZE}" \
+            status=none | sha256sum
 
           echo "===== 校验 U-Boot raw 写入 ====="
           UBOOT_SIZE="$(stat -c '%s' "${SRC_UBOOT}")"
-          UBOOT_BLOCKS=$(( (UBOOT_SIZE + 511) / 512 ))
 
           sha256sum "${SRC_UBOOT}"
-          sudo dd if="${DEV}" bs=512 skip=16384 count="${UBOOT_BLOCKS}" status=none | \
-            head -c "${UBOOT_SIZE}" | sha256sum
+          sudo dd if="${DEV}" \
+            bs=1 \
+            iflag=skip_bytes,count_bytes \
+            skip=$((16384 * 512)) \
+            count="${UBOOT_SIZE}" \
+            status=none | sha256sum
 
           DTB_INJECTED=false
           BOOT_CONFIG_UPDATED=false
