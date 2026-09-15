@@ -311,6 +311,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # 这一段必须新增：下载要修改、且后面要执行的 FnNAS action 源码
+      - name: Checkout FnNAS packager source
+        uses: actions/checkout@v6
+        with:
+          repository: ophub/fnnas
+          ref: main
+          path: fnnas-action
+          fetch-depth: 1
+
       - name: Initialize the build environment
         id: init
         env:
@@ -337,14 +346,7 @@ jobs:
           timedatectl status || true
           echo "status=success" >> ${GITHUB_OUTPUT}
 
-      # 这一段必须新增：下载要修改、且后面要执行的 FnNAS action 源码
-      - name: Checkout FnNAS packager source
-        uses: actions/checkout@v6
-        with:
-          repository: ophub/fnnas
-          ref: main
-          path: fnnas-action
-          fetch-depth: 1
+
 
       - name: Create virtual disk for extended storage
         id: disk
