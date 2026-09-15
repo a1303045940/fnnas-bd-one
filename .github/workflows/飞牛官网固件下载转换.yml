@@ -14,7 +14,7 @@ on:
       version_tag:
         description: "Release 标签版本"
         required: true
-        default: "v1.2.0302-bd-one"
+        default: "v1.2.0302-bendian-one"
 
 permissions:
   contents: write
