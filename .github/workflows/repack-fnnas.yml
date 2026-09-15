@@ -53,71 +53,81 @@ jobs:
 
           IMAGE="base_image.img"
           MOUNT_DIR="/mnt/fnnas-part"
+
           SRC_IDB="my-boot/idbloader-rk3568-bd-one.img"
           SRC_UBOOT="my-boot/u-boot-rk3568-bd-one.itb"
           SRC_DTB="my-boot/rk3568-bd-one.dtb"
-          TARGET_DTB_NAME="rk3568-bd-one.dtb"
 
-          for f in "${IMAGE}" "${SRC_IDB}" "${SRC_UBOOT}" "${SRC_DTB}"; do
-            [[ -s "${f}" ]] || {
-              echo "错误：文件不存在或大小为 0：${f}"
+          DTB_NAME="rk3568-bd-one.dtb"
+          DTB_BOOT_PATH="/dtb/rockchip/${DTB_NAME}"
+
+          for file in "${IMAGE}" "${SRC_IDB}" "${SRC_UBOOT}" "${SRC_DTB}"; do
+            [[ -s "${file}" ]] || {
+              echo "错误：文件不存在或大小为 0：${file}"
               exit 1
             }
           done
 
           DEV=""
-          MOUNTED=""
+          MOUNTED=false
 
           cleanup() {
-            status=$?
+            rc=$?
             set +e
 
-            if [[ -n "${MOUNTED}" ]] && mountpoint -q "${MOUNT_DIR}"; then
+            if [[ "${MOUNTED}" == "true" ]] && mountpoint -q "${MOUNT_DIR}"; then
               sudo umount "${MOUNT_DIR}"
             fi
 
             if [[ -n "${DEV}" ]]; then
-              sudo losetup -d "${DEV}"
+              sudo losetup -d "${DEV}" 2>/dev/null || true
             fi
 
-            exit "${status}"
+            exit "${rc}"
           }
 
           trap cleanup EXIT INT TERM
 
           sudo mkdir -p "${MOUNT_DIR}"
 
-          echo "===== Source file hashes ====="
+          echo "===== 自定义文件 SHA256 ====="
           sha256sum "${SRC_IDB}" "${SRC_UBOOT}" "${SRC_DTB}"
 
-          echo "===== Attach image as loop device ====="
+          echo "===== 挂载镜像到 loop 设备 ====="
           DEV="$(sudo losetup --find --show --partscan "${IMAGE}")"
           echo "Loop device: ${DEV}"
 
           sudo partprobe "${DEV}" || true
           sudo udevadm settle || true
+
+          echo "===== 分区表 ====="
           lsblk -o NAME,SIZE,FSTYPE,LABEL,PARTLABEL,MOUNTPOINTS "${DEV}"
 
-          echo "===== Write RK3568 bootloader ====="
-          sudo dd if="${SRC_IDB}" of="${DEV}" bs=512 seek=64 conv=notrunc,fsync status=progress
-          sudo dd if="${SRC_UBOOT}" of="${DEV}" bs=512 seek=16384 conv=notrunc,fsync status=progress
+          echo "===== 写入 Rockchip bootloader ====="
+          sudo dd if="${SRC_IDB}" of="${DEV}" \
+            bs=512 seek=64 conv=notrunc,fsync status=progress
 
-          echo "===== Verify raw bootloader writes ====="
+          sudo dd if="${SRC_UBOOT}" of="${DEV}" \
+            bs=512 seek=16384 conv=notrunc,fsync status=progress
+
+          echo "===== 校验 idbloader raw 写入 ====="
           IDB_SIZE="$(stat -c '%s' "${SRC_IDB}")"
-          UBOOT_SIZE="$(stat -c '%s' "${SRC_UBOOT}")"
-
-          sudo dd if="${DEV}" bs=512 skip=64 count=$(( (IDB_SIZE + 511) / 512 )) status=none | \
-            head -c "${IDB_SIZE}" | sha256sum
+          IDB_BLOCKS=$(( (IDB_SIZE + 511) / 512 ))
 
           sha256sum "${SRC_IDB}"
+          sudo dd if="${DEV}" bs=512 skip=64 count="${IDB_BLOCKS}" status=none | \
+            head -c "${IDB_SIZE}" | sha256sum
 
-          sudo dd if="${DEV}" bs=512 skip=16384 count=$(( (UBOOT_SIZE + 511) / 512 )) status=none | \
-            head -c "${UBOOT_SIZE}" | sha256sum
+          echo "===== 校验 U-Boot raw 写入 ====="
+          UBOOT_SIZE="$(stat -c '%s' "${SRC_UBOOT}")"
+          UBOOT_BLOCKS=$(( (UBOOT_SIZE + 511) / 512 ))
 
           sha256sum "${SRC_UBOOT}"
+          sudo dd if="${DEV}" bs=512 skip=16384 count="${UBOOT_BLOCKS}" status=none | \
+            head -c "${UBOOT_SIZE}" | sha256sum
 
-          BOOT_CONFIG_FOUND=false
           DTB_INJECTED=false
+          BOOT_CONFIG_UPDATED=false
 
           for PART in "${DEV}"p*; do
             [[ -b "${PART}" ]] || continue
@@ -125,13 +135,13 @@ jobs:
             FSTYPE="$(lsblk -no FSTYPE "${PART}" | head -n 1)"
             [[ -n "${FSTYPE}" ]] || continue
 
-            echo "===== Check partition: ${PART}, fs=${FSTYPE} ====="
+            echo "===== 扫描分区：${PART}，文件系统：${FSTYPE} ====="
 
             if ! sudo mount -o rw "${PART}" "${MOUNT_DIR}"; then
-              echo "Skip: cannot mount ${PART}"
+              echo "跳过：不能挂载 ${PART}"
               continue
             fi
-            MOUNTED="${PART}"
+            MOUNTED=true
 
             TARGET_DTB_DIR="$(sudo find "${MOUNT_DIR}" \
               -type d \
@@ -139,16 +149,16 @@ jobs:
               -print -quit 2>/dev/null || true)"
 
             if [[ -n "${TARGET_DTB_DIR}" ]]; then
-              echo "DTB directory: ${TARGET_DTB_DIR}"
+              echo "发现 DTB 目录：${TARGET_DTB_DIR}"
 
               sudo install -Dm0644 \
                 "${SRC_DTB}" \
-                "${TARGET_DTB_DIR}/${TARGET_DTB_NAME}"
+                "${TARGET_DTB_DIR}/${DTB_NAME}"
 
-              echo "===== Verify injected DTB ====="
+              echo "===== 校验最终 DTB ====="
               sha256sum "${SRC_DTB}"
-              sudo sha256sum "${TARGET_DTB_DIR}/${TARGET_DTB_NAME}"
-              sudo cmp -s "${SRC_DTB}" "${TARGET_DTB_DIR}/${TARGET_DTB_NAME}"
+              sudo sha256sum "${TARGET_DTB_DIR}/${DTB_NAME}"
+              sudo cmp -s "${SRC_DTB}" "${TARGET_DTB_DIR}/${DTB_NAME}"
 
               DTB_INJECTED=true
             fi
@@ -169,67 +179,71 @@ jobs:
               -print -quit 2>/dev/null || true)"
 
             if [[ -n "${EXTLINUX_CONF}" ]]; then
-              echo "===== Found extlinux.conf: ${EXTLINUX_CONF} ====="
+              echo "===== 找到 extlinux.conf ====="
+              echo "路径：${EXTLINUX_CONF}"
               sudo cat "${EXTLINUX_CONF}"
 
               if sudo grep -qE '^[[:space:]]*FDT[[:space:]]+' "${EXTLINUX_CONF}"; then
                 sudo sed -i -E \
-                  's|^[[:space:]]*FDT[[:space:]]+.*|  FDT /dtb/rockchip/rk3568-bd-one.dtb|' \
+                  "s|^[[:space:]]*FDT[[:space:]]+.*|  FDT ${DTB_BOOT_PATH}|" \
                   "${EXTLINUX_CONF}"
               else
-                sudo sed -i '/^[[:space:]]*LINUX[[:space:]]/a\  FDT /dtb/rockchip/rk3568-bd-one.dtb' \
+                sudo sed -i \
+                  "/^[[:space:]]*LINUX[[:space:]]/a\  FDT ${DTB_BOOT_PATH}" \
                   "${EXTLINUX_CONF}"
               fi
 
-              echo "===== Updated extlinux.conf ====="
+              echo "===== 修改后的 extlinux.conf ====="
               sudo cat "${EXTLINUX_CONF}"
-              BOOT_CONFIG_FOUND=true
+              BOOT_CONFIG_UPDATED=true
 
             elif [[ -n "${FNENV_CONF}" ]]; then
-              echo "===== Found fnEnv.txt: ${FNENV_CONF} ====="
+              echo "===== 找到 fnEnv.txt ====="
+              echo "路径：${FNENV_CONF}"
 
               if sudo grep -qE '^fdtfile=' "${FNENV_CONF}"; then
                 sudo sed -i -E \
-                  's|^fdtfile=.*|fdtfile=rockchip/rk3568-bd-one.dtb|' \
+                  "s|^fdtfile=.*|fdtfile=rockchip/${DTB_NAME}|" \
                   "${FNENV_CONF}"
               else
-                echo 'fdtfile=rockchip/rk3568-bd-one.dtb' | sudo tee -a "${FNENV_CONF}" >/dev/null
+                echo "fdtfile=rockchip/${DTB_NAME}" | sudo tee -a "${FNENV_CONF}" >/dev/null
               fi
 
               sudo cat "${FNENV_CONF}"
-              BOOT_CONFIG_FOUND=true
+              BOOT_CONFIG_UPDATED=true
 
             elif [[ -n "${ARMBIANENV_CONF}" ]]; then
-              echo "===== Found armbianEnv.txt: ${ARMBIANENV_CONF} ====="
+              echo "===== 找到 armbianEnv.txt ====="
+              echo "路径：${ARMBIANENV_CONF}"
 
               if sudo grep -qE '^fdtfile=' "${ARMBIANENV_CONF}"; then
                 sudo sed -i -E \
-                  's|^fdtfile=.*|fdtfile=rockchip/rk3568-bd-one.dtb|' \
+                  "s|^fdtfile=.*|fdtfile=rockchip/${DTB_NAME}|" \
                   "${ARMBIANENV_CONF}"
               else
-                echo 'fdtfile=rockchip/rk3568-bd-one.dtb' | sudo tee -a "${ARMBIANENV_CONF}" >/dev/null
+                echo "fdtfile=rockchip/${DTB_NAME}" | sudo tee -a "${ARMBIANENV_CONF}" >/dev/null
               fi
 
               sudo cat "${ARMBIANENV_CONF}"
-              BOOT_CONFIG_FOUND=true
+              BOOT_CONFIG_UPDATED=true
             fi
 
             sudo sync
             sudo umount "${MOUNT_DIR}"
-            MOUNTED=""
+            MOUNTED=false
           done
 
           [[ "${DTB_INJECTED}" == "true" ]] || {
-            echo "错误：未在任何可挂载分区中找到 dtb/rockchip 目录。"
+            echo "错误：没有在镜像分区中找到 dtb/rockchip 目录。"
             exit 1
           }
 
-          [[ "${BOOT_CONFIG_FOUND}" == "true" ]] || {
-            echo "错误：未找到 extlinux.conf、fnEnv.txt 或 armbianEnv.txt。"
+          [[ "${BOOT_CONFIG_UPDATED}" == "true" ]] || {
+            echo "错误：未找到有效启动配置：extlinux.conf、fnEnv.txt、armbianEnv.txt。"
             exit 1
           }
 
-          echo "自定义 RK3568 bootloader、DTB 和启动配置均已完成注入。"
+          echo "✅ 自定义 idbloader、U-Boot、DTB 和启动配置均已注入并校验完成。"
           
       - name: Compress Patched Image
         run: |
