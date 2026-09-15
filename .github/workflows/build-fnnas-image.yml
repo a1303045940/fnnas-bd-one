@@ -570,7 +570,7 @@ jobs:
           builder_name: ${{ inputs.builder_name }}
 
       - name: Upload packaged FnNAS to Release
-        uses: ophub/upload-to-releases@main
+        uses: ./fnnas-action
         if: ${{ env.PACKAGED_STATUS == 'success' && !cancelled() }}
         with:
           tag: ${{ env.build_tag }}
