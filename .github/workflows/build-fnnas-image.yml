@@ -466,8 +466,21 @@ jobs:
           [[ "${?}" -ne "0" ]] && echo "Error: Download failed." && exit 1
 
           # Create directory symlinks for packaging
-          ln -sf /builder/fnnas ${{ github.workspace }}/fnnas
-          ln -sf /builder/fnnas /home/runner/work/_actions/ophub/fnnas/main/fnnas
+          # 供 workflow workspace 与本地 FnNAS action 读取同一份基础镜像
+          ln -sfn /builder/fnnas "${GITHUB_WORKSPACE}/fnnas"
+          ln -sfn /builder/fnnas "${GITHUB_WORKSPACE}/fnnas-action/fnnas"
+
+          echo "===== 检查基础镜像软链接 ====="
+          ls -ld \
+            "${GITHUB_WORKSPACE}/fnnas" \
+            "${GITHUB_WORKSPACE}/fnnas-action/fnnas"
+
+          find -L "${GITHUB_WORKSPACE}/fnnas" \
+            -maxdepth 1 \
+            -type f \
+            -name '*.img.xz' \
+            -printf '%f  %s bytes\n'
+          
 
           echo "build_tag=${build_tag}" >> ${GITHUB_ENV}
           echo "status=success" >> ${GITHUB_OUTPUT}
