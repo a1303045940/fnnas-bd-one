@@ -24,7 +24,7 @@ on:
       fnnas_board:
         description: "Select fnnas device board"
         required: false
-        default: "rockchip50"
+        default: "bdkj-bd-one"
         type: choice
         options:
           - allwinner
