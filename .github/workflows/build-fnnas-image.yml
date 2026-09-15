@@ -568,7 +568,7 @@ jobs:
 
       - name: Package FnNAS for target boards
         if: ${{ steps.down.outputs.status == 'success' && !cancelled() }}
-        uses: ophub/fnnas@main
+        uses: ./fnnas-action
         with:
           fnnas_path: fnnas/*.img.xz
           fnnas_board: ${{ inputs.fnnas_board }}
@@ -579,7 +579,7 @@ jobs:
           builder_name: ${{ inputs.builder_name }}
 
       - name: Upload packaged FnNAS to Release
-        uses: ./fnnas-action
+        uses: ophub/upload-to-releases@main
         if: ${{ env.PACKAGED_STATUS == 'success' && !cancelled() }}
         with:
           tag: ${{ env.build_tag }}
