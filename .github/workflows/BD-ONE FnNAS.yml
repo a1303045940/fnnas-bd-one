@@ -1,0 +1,276 @@
+name: BD-ONE FnNAS
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_url:
+        description: "Official FnNAS Image Download URL"
+        required: true
+        default: "https://download.liveupdate.fnnas.com/arm/image/1.2.0302/mrkaio-m68s/fnos_Mainland-PE_arm_1.2.0302_mrkaio-m68s_2288.img.gz?sign=496b9c10436d6759d1e1273bd4a2653d&t=1789477906"
+      target_board:
+        description: "Target Board Identifier"
+        required: true
+        default: "bdkj-bd-one"
+      version_tag:
+        description: "Release Tag"
+        required: true
+        default: "v1.2.0302-bd-one"
+
+permissions:
+  contents: write
+
+jobs:
+  repack-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Free Disk Space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
+          sudo apt-get clean
+          df -h
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pigz gzip coreutils util-linux
+
+      - name: Download & Extract Base Image
+        run: |
+          echo "Downloading official image..."
+          curl -fSL "${{ inputs.image_url }}" -o base_image.img.gz
+          echo "Decompressing gz image..."
+          pigz -d base_image.img.gz
+          ls -lh base_image.img
+
+      - name: Inject Custom Bootloader and DTB
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          IMAGE="base_image.img"
+          MOUNT_DIR="/mnt/fnnas-part"
+
+          SRC_IDB="my-boot/idbloader-rk3568-bd-one.img"
+          SRC_UBOOT="my-boot/u-boot-rk3568-bd-one.itb"
+          SRC_DTB="my-boot/rk3568-bd-one.dtb"
+
+          DTB_NAME="rk3568-bd-one.dtb"
+          DTB_BOOT_PATH="/dtb/rockchip/${DTB_NAME}"
+
+          for file in "${IMAGE}" "${SRC_IDB}" "${SRC_UBOOT}" "${SRC_DTB}"; do
+            [[ -s "${file}" ]] || {
+              echo "错误：文件不存在或大小为 0：${file}"
+              exit 1
+            }
+          done
+
+          DEV=""
+          MOUNTED=false
+
+          cleanup() {
+            rc=$?
+            set +e
+
+            if [[ "${MOUNTED}" == "true" ]] && mountpoint -q "${MOUNT_DIR}"; then
+              sudo umount "${MOUNT_DIR}"
+            fi
+
+            if [[ -n "${DEV}" ]]; then
+              sudo losetup -d "${DEV}" 2>/dev/null || true
+            fi
+
+            exit "${rc}"
+          }
+
+          trap cleanup EXIT INT TERM
+
+          sudo mkdir -p "${MOUNT_DIR}"
+
+          echo "===== 自定义文件 SHA256 ====="
+          sha256sum "${SRC_IDB}" "${SRC_UBOOT}" "${SRC_DTB}"
+
+          echo "===== 挂载镜像到 loop 设备 ====="
+          DEV="$(sudo losetup --find --show --partscan "${IMAGE}")"
+          echo "Loop device: ${DEV}"
+
+          sudo partprobe "${DEV}" || true
+          sudo udevadm settle || true
+
+          echo "===== 分区表 ====="
+          lsblk -o NAME,SIZE,FSTYPE,LABEL,PARTLABEL,MOUNTPOINTS "${DEV}"
+
+          echo "===== 写入 Rockchip bootloader ====="
+          sudo dd if="${SRC_IDB}" of="${DEV}" \
+            bs=512 seek=64 conv=notrunc,fsync status=progress
+
+          sudo dd if="${SRC_UBOOT}" of="${DEV}" \
+            bs=512 seek=16384 conv=notrunc,fsync status=progress
+
+          echo "===== 校验 idbloader raw 写入 ====="
+          IDB_SIZE="$(stat -c '%s' "${SRC_IDB}")"
+
+          sha256sum "${SRC_IDB}"
+          sudo dd if="${DEV}" \
+            bs=1 \
+            iflag=skip_bytes,count_bytes \
+            skip=$((64 * 512)) \
+            count="${IDB_SIZE}" \
+            status=none | sha256sum
+
+          echo "===== 校验 U-Boot raw 写入 ====="
+          UBOOT_SIZE="$(stat -c '%s' "${SRC_UBOOT}")"
+
+          sha256sum "${SRC_UBOOT}"
+          sudo dd if="${DEV}" \
+            bs=1 \
+            iflag=skip_bytes,count_bytes \
+            skip=$((16384 * 512)) \
+            count="${UBOOT_SIZE}" \
+            status=none | sha256sum
+
+          DTB_INJECTED=false
+          BOOT_CONFIG_UPDATED=false
+
+          for PART in "${DEV}"p*; do
+            [[ -b "${PART}" ]] || continue
+
+            FSTYPE="$(lsblk -no FSTYPE "${PART}" | head -n 1)"
+            [[ -n "${FSTYPE}" ]] || continue
+
+            echo "===== 扫描分区：${PART}，文件系统：${FSTYPE} ====="
+
+            if ! sudo mount -o rw "${PART}" "${MOUNT_DIR}"; then
+              echo "跳过：不能挂载 ${PART}"
+              continue
+            fi
+            MOUNTED=true
+
+            TARGET_DTB_DIR="$(sudo find "${MOUNT_DIR}" \
+              -type d \
+              -path '*/dtb/rockchip' \
+              -print -quit 2>/dev/null || true)"
+
+            if [[ -n "${TARGET_DTB_DIR}" ]]; then
+              echo "发现 DTB 目录：${TARGET_DTB_DIR}"
+
+              sudo install -Dm0644 \
+                "${SRC_DTB}" \
+                "${TARGET_DTB_DIR}/${DTB_NAME}"
+
+              echo "===== 校验最终 DTB ====="
+              sha256sum "${SRC_DTB}"
+              sudo sha256sum "${TARGET_DTB_DIR}/${DTB_NAME}"
+              sudo cmp -s "${SRC_DTB}" "${TARGET_DTB_DIR}/${DTB_NAME}"
+
+              DTB_INJECTED=true
+            fi
+
+            EXTLINUX_CONF="$(sudo find "${MOUNT_DIR}" \
+              -type f \
+              -path '*/extlinux/extlinux.conf' \
+              -print -quit 2>/dev/null || true)"
+
+            FNENV_CONF="$(sudo find "${MOUNT_DIR}" \
+              -type f \
+              -name 'fnEnv.txt' \
+              -print -quit 2>/dev/null || true)"
+
+            ARMBIANENV_CONF="$(sudo find "${MOUNT_DIR}" \
+              -type f \
+              -name 'armbianEnv.txt' \
+              -print -quit 2>/dev/null || true)"
+
+            if [[ -n "${EXTLINUX_CONF}" ]]; then
+              echo "===== 找到 extlinux.conf ====="
+              echo "路径：${EXTLINUX_CONF}"
+              sudo cat "${EXTLINUX_CONF}"
+
+              if sudo grep -qE '^[[:space:]]*FDT[[:space:]]+' "${EXTLINUX_CONF}"; then
+                sudo sed -i -E \
+                  "s|^[[:space:]]*FDT[[:space:]]+.*|  FDT ${DTB_BOOT_PATH}|" \
+                  "${EXTLINUX_CONF}"
+              else
+                sudo sed -i \
+                  "/^[[:space:]]*LINUX[[:space:]]/a\  FDT ${DTB_BOOT_PATH}" \
+                  "${EXTLINUX_CONF}"
+              fi
+
+              echo "===== 修改后的 extlinux.conf ====="
+              sudo cat "${EXTLINUX_CONF}"
+              BOOT_CONFIG_UPDATED=true
+
+            elif [[ -n "${FNENV_CONF}" ]]; then
+              echo "===== 找到 fnEnv.txt ====="
+              echo "路径：${FNENV_CONF}"
+
+              if sudo grep -qE '^fdtfile=' "${FNENV_CONF}"; then
+                sudo sed -i -E \
+                  "s|^fdtfile=.*|fdtfile=rockchip/${DTB_NAME}|" \
+                  "${FNENV_CONF}"
+              else
+                echo "fdtfile=rockchip/${DTB_NAME}" | sudo tee -a "${FNENV_CONF}" >/dev/null
+              fi
+
+              sudo cat "${FNENV_CONF}"
+              BOOT_CONFIG_UPDATED=true
+
+            elif [[ -n "${ARMBIANENV_CONF}" ]]; then
+              echo "===== 找到 armbianEnv.txt ====="
+              echo "路径：${ARMBIANENV_CONF}"
+
+              if sudo grep -qE '^fdtfile=' "${ARMBIANENV_CONF}"; then
+                sudo sed -i -E \
+                  "s|^fdtfile=.*|fdtfile=rockchip/${DTB_NAME}|" \
+                  "${ARMBIANENV_CONF}"
+              else
+                echo "fdtfile=rockchip/${DTB_NAME}" | sudo tee -a "${ARMBIANENV_CONF}" >/dev/null
+              fi
+
+              sudo cat "${ARMBIANENV_CONF}"
+              BOOT_CONFIG_UPDATED=true
+            fi
+
+            sudo sync
+            sudo umount "${MOUNT_DIR}"
+            MOUNTED=false
+          done
+
+          [[ "${DTB_INJECTED}" == "true" ]] || {
+            echo "错误：没有在镜像分区中找到 dtb/rockchip 目录。"
+            exit 1
+          }
+
+          [[ "${BOOT_CONFIG_UPDATED}" == "true" ]] || {
+            echo "错误：未找到有效启动配置：extlinux.conf、fnEnv.txt、armbianEnv.txt。"
+            exit 1
+          }
+
+          echo "✅ 自定义 idbloader、U-Boot、DTB 和启动配置均已注入并校验完成。"
+          
+      - name: Compress Patched Image
+        run: |
+          TARGET_NAME="fnos_1.2.0302_${{ inputs.target_board }}_rk3568.img"
+          mv base_image.img "${TARGET_NAME}"
+          echo "Compressing with pigz..."
+          pigz -9 "${TARGET_NAME}"
+          ls -lh *.img.gz
+
+      - name: Upload packaged FnNAS to Release
+        uses: ophub/upload-to-releases@main
+        if: ${{ !cancelled() }}
+        with:
+          tag: ${{ inputs.version_tag }}
+          artifacts: "*.img.gz"
+          allow_updates: true
+          remove_artifacts: false
+          replaces_artifacts: true
+          make_latest: true
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
+          body: |
+            - 基于 FnOS 官方 1.2.0302 镜像重打包
+            - 适配设备目标板卡: ${{ inputs.target_board }}
+            - 注入引导: U-Boot + idbloader + 设备专用 DTB
