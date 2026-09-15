@@ -337,6 +337,15 @@ jobs:
           timedatectl status || true
           echo "status=success" >> ${GITHUB_OUTPUT}
 
+      # 这一段必须新增：下载要修改、且后面要执行的 FnNAS action 源码
+      - name: Checkout FnNAS packager source
+        uses: actions/checkout@v6
+        with:
+          repository: ophub/fnnas
+          ref: main
+          path: fnnas-action
+          fetch-depth: 1
+
       - name: Create virtual disk for extended storage
         id: disk
         run: |
@@ -464,16 +473,6 @@ jobs:
           echo "status=success" >> ${GITHUB_OUTPUT}
 
 # 🔥🔥🔥 【开始：修正后的代码】 🔥🔥🔥
-      # 这一段必须新增：下载要修改、且后面要执行的 FnNAS action 源码
-      - name: Checkout FnNAS packager source
-        uses: actions/checkout@v6
-        with:
-          repository: ophub/fnnas
-          ref: main
-          path: fnnas-action
-          fetch-depth: 1
-
-
       - name: Inject custom BDKJ-One bootloader and DTB
         shell: bash
         run: |
