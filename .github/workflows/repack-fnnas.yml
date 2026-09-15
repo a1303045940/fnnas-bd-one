@@ -118,12 +118,11 @@ jobs:
           echo "RELEASE_FILE=${FINAL_FILE}" >> $GITHUB_ENV
           ls -lh "${FINAL_FILE}"
 
-      - name: Upload to GitHub Releases
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: |
-          TAG="${{ inputs.version_tag }}"
-          gh release create "$TAG" "${{ env.RELEASE_FILE }}" \
-            --title "FnNAS for ${{ inputs.target_board }} ($TAG)" \
-            --notes "Automated repack of official FnNAS image adapted for ${{ inputs.target_board }} using custom U-Boot and DTB." \
-            --clobber
+- name: Upload to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version_tag }}
+          name: FnNAS for ${{ inputs.target_board }} (${{ inputs.version_tag }})
+          body: "Automated repack of official FnNAS image adapted for ${{ inputs.target_board }} using custom U-Boot and DTB."
+          files: ${{ env.RELEASE_FILE }}
+          token: ${{ secrets.GITHUB_TOKEN }}
