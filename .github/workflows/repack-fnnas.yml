@@ -1,0 +1,129 @@
+name: Repack FnNAS for RK3568 Board
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_url:
+        description: "Official FnNAS Image Download URL"
+        required: true
+        default: "https://download.liveupdate.fnnas.com/arm/image/1.2.0302/mrkaio-m68s/fnos_Mainland-PE_arm_1.2.0302_mrkaio-m68s_2288.img.gz?sign=496b9c10436d6759d1e1273bd4a2653d&t=1789477906"
+      target_board:
+        description: "Target Board Identifier"
+        required: true
+        default: "bdkj-bd-one"
+      version_tag:
+        description: "Release Tag"
+        required: true
+        default: "v1.2.0302-bd-one"
+
+permissions:
+  contents: write
+
+jobs:
+  repack-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Free Disk Space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
+          sudo apt-get clean
+          df -h
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pigz gzip coreutils util-linux
+
+      - name: Download & Extract Base Image
+        run: |
+          echo "Downloading official image..."
+          curl -fSL "${{ inputs.image_url }}" -o base_image.img.gz
+          echo "Decompressing gz image..."
+          pigz -d base_image.img.gz
+          ls -lh base_image.img
+
+      - name: Inject Custom Bootloader and DTB
+        run: |
+          set -e
+          echo "Setting up loop device..."
+          DEV=$(sudo losetup -Pf --show base_image.img)
+          echo "Mapped loop device: ${DEV}"
+
+          # 1. 写入底层引导到对应扇区
+          echo "Writing idbloader to sector 64..."
+          sudo dd if=my-boot/idbloader-rk3568-bd-one.img of="${DEV}" seek=64 bs=512 conv=notrunc
+
+          echo "Writing u-boot to sector 16384..."
+          sudo dd if=my-boot/u-boot-rk3568-bd-one.itb of="${DEV}" seek=16384 bs=512 conv=notrunc
+
+          # 2. 挂载 Boot 分区
+          sudo mkdir -p /mnt/boot
+          MOUNT_DEV=""
+          for part in "${DEV}p1" "${DEV}p2"; do
+            if [ -b "$part" ]; then
+              if sudo mount "$part" /mnt/boot 2>/dev/null; then
+                if [ -d "/mnt/boot/extlinux" ] || [ -d "/mnt/boot/boot/extlinux" ] || [ -d "/mnt/boot/dtb" ]; then
+                  MOUNT_DEV="$part"
+                  echo "Found boot partition on ${part}"
+                  break
+                else
+                  sudo umount /mnt/boot
+                fi
+              fi
+            fi
+          done
+
+          if [ -z "$MOUNT_DEV" ]; then
+            echo "Direct search failed, mounting ${DEV}p1 as fallback..."
+            sudo mount "${DEV}p1" /mnt/boot
+            MOUNT_DEV="${DEV}p1"
+          fi
+
+          # 3. 查找并替换 DTB
+          DTB_DIR=$(sudo find /mnt/boot -type d -path "*/dtb/rockchip" 2>/dev/null | head -n 1)
+          if [ -z "$DTB_DIR" ]; then
+            DTB_DIR="/mnt/boot/dtb/rockchip"
+            sudo mkdir -p "$DTB_DIR"
+          fi
+          echo "Copying DTB to: $DTB_DIR"
+          sudo cp -fv dtb/rk3568-bd-one.dtb "$DTB_DIR/"
+
+          # 4. 修改 extlinux.conf 中的设备树指向
+          CONF_FILE=$(sudo find /mnt/boot -name "extlinux.conf" 2>/dev/null | head -n 1)
+          if [ -n "$CONF_FILE" ]; then
+            echo "Updating $CONF_FILE ..."
+            sudo sed -i -E "s|^([[:space:]]*fdt[[:space:]]+).*|\1/dtb/rockchip/rk3568-bd-one.dtb|g" "$CONF_FILE"
+            echo "Modified extlinux.conf:"
+            cat "$CONF_FILE"
+          else
+            echo "Warning: extlinux.conf not found. Ensure DTB is picked up correctly."
+          fi
+
+          # 5. 清理挂载与回环
+          sync
+          sudo umount /mnt/boot
+          sudo losetup -d "${DEV}"
+
+      - name: Compress Patched Image
+        run: |
+          TARGET_NAME="fnos_1.2.0302_${{ inputs.target_board }}_rk3568.img"
+          mv base_image.img "${TARGET_NAME}"
+          echo "Compressing with pigz..."
+          pigz -9 "${TARGET_NAME}"
+          FINAL_FILE="${TARGET_NAME}.gz"
+          echo "RELEASE_FILE=${FINAL_FILE}" >> $GITHUB_ENV
+          ls -lh "${FINAL_FILE}"
+
+      - name: Upload to GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ inputs.version_tag }}"
+          gh release create "$TAG" "${{ env.RELEASE_FILE }}" \
+            --title "FnNAS for ${{ inputs.target_board }} ($TAG)" \
+            --notes "Automated repack of official FnNAS image adapted for ${{ inputs.target_board }} using custom U-Boot and DTB." \
+            --clobber
