@@ -361,7 +361,7 @@ jobs:
         working-directory: /builder
         if: (!cancelled())
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           # Create directory
           [[ -d "fnnas" ]] || mkdir -p fnnas
