@@ -96,14 +96,30 @@ jobs:
           DEV=$(sudo losetup -Pf --show base_image.img)
           echo "Mapped loop device: ${DEV}"
 
-          # 1. 写入底层引导到固化扇区
+          # 1. 写入底层引导到对应扇区
           echo "Writing idbloader to sector 64..."
           sudo dd if=my-boot/idbloader-rk3568-bd-one.img of="${DEV}" seek=64 bs=512 conv=notrunc
 
           echo "Writing u-boot to sector 16384..."
           sudo dd if=my-boot/u-boot-rk3568-bd-one.itb of="${DEV}" seek=16384 bs=512 conv=notrunc
 
-          # 2. 遍历扫描分区注入 DTB 与修改引导文件
+          # 2. 定位 my-boot 中的自定义 DTB 文件
+          SRC_DTB=""
+          if [ -f "my-boot/urk3568-bd-one.dtb" ]; then
+            SRC_DTB="my-boot/urk3568-bd-one.dtb"
+          elif [ -f "my-boot/rk3568-bd-one.dtb" ]; then
+            SRC_DTB="my-boot/rk3568-bd-one.dtb"
+          fi
+
+          if [ -z "$SRC_DTB" ]; then
+            echo "❌ 严重错误: 在 my-boot 目录下未找到 DTB 文件！"
+            echo "当前 my-boot 目录文件清单:"
+            ls -la my-boot/
+            exit 1
+          fi
+          echo "✅ 成功找到目标 DTB 文件: $SRC_DTB"
+
+          # 3. 遍历扫描分区注入 DTB 与修改引导文件
           sudo mkdir -p /mnt/part
           ENV_MODIFIED=false
 
@@ -111,20 +127,23 @@ jobs:
             [ -b "$PART" ] || continue
             
             if sudo mount "$PART" /mnt/part 2>/dev/null; then
-              # 替换并放置设备树
+              # 寻找 Rockchip 设备树目录
               TARGET_DTB_DIR=$(sudo find /mnt/part -type d -path "*/dtb/rockchip" 2>/dev/null | head -n 1)
               if [ -n "$TARGET_DTB_DIR" ]; then
                 echo "Found Rockchip DTB dir at: $TARGET_DTB_DIR"
-                sudo cp -fv dtb/rk3568-bd-one.dtb "$TARGET_DTB_DIR/"
                 
-                # 同名覆盖原有设备树（双保险）
+                # 规范化复制为 rk3568-bd-one.dtb
+                echo "Injecting: $SRC_DTB -> $TARGET_DTB_DIR/rk3568-bd-one.dtb"
+                sudo cp -fv "$SRC_DTB" "$TARGET_DTB_DIR/rk3568-bd-one.dtb"
+                
+                # 双保险：同名覆盖原版 rk3568-hnas.dtb
                 if [ -f "$TARGET_DTB_DIR/rk3568-hnas.dtb" ]; then
-                  echo "Overwriting rk3568-hnas.dtb..."
-                  sudo cp -fv dtb/rk3568-bd-one.dtb "$TARGET_DTB_DIR/rk3568-hnas.dtb"
+                  echo "Overwriting rk3568-hnas.dtb with $SRC_DTB ..."
+                  sudo cp -fv "$SRC_DTB" "$TARGET_DTB_DIR/rk3568-hnas.dtb"
                 fi
               fi
 
-              # 修改 fnEnv.txt 引导参数
+              # 修改 fnEnv.txt
               ENV_FILE=$(sudo find /mnt/part -name "fnEnv.txt" 2>/dev/null | head -n 1)
               if [ -n "$ENV_FILE" ]; then
                 echo "Found fnEnv.txt at: $ENV_FILE"
@@ -141,10 +160,11 @@ jobs:
 
           sudo losetup -d "${DEV}"
 
+          # 4. 校验注入结果
           if [ "$ENV_MODIFIED" = true ]; then
-            echo "✅ 引导参数及 DTB 替换完毕！"
+            echo "✅ 成功将 $SRC_DTB 注入镜像并完成引导参数配置！"
           else
-            echo "❌ 错误: 未能在分区中匹配并修改 fnEnv.txt！"
+            echo "❌ 错误: 未能在分区中匹配到 fnEnv.txt！"
             exit 1
           fi
 
