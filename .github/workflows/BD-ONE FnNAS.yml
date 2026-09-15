@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       image_url:
-        description: "Official FnNAS Image Download URL"
+        description: "Official/Custom FnNAS Image Download URL"
         required: true
         default: "https://github.com/a1303045940/fnnas-bd-one/releases/download/untagged-f73eae35ed6efef245e7/fnos_Mainland-PE_arm_1.2.0302_nanopi-r5c_2288.img.gz"
       target_board:
@@ -36,13 +36,41 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pigz gzip coreutils util-linux
+          sudo apt-get install -y pigz gzip coreutils util-linux curl gh
 
       - name: Download & Extract Base Image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Downloading official image..."
-          curl -fSL "${{ inputs.image_url }}" -o base_image.img.gz
-          echo "Decompressing gz image..."
+          set -euo pipefail
+          RAW_URL="${{ inputs.image_url }}"
+          TARGET_FILE="fnos_Mainland-PE_arm_1.2.0302_nanopi-r5c_2288.img.gz"
+          echo "Processing URL: ${RAW_URL}"
+
+          # 兼容处理 /releases/tag/... 与 /releases/download/... 两种 GitHub 链接
+          if [[ "${RAW_URL}" =~ github\.com/([^/]+)/([^/]+)/releases/(download/)?([^/]+)(/(.+))? ]]; then
+            OWNER="${BASH_REMATCH[1]}"
+            REPO="${BASH_REMATCH[2]}"
+            TAG="${BASH_REMATCH[4]}"
+            FILENAME="${BASH_REMATCH[6]:-${TARGET_FILE}}"
+            
+            echo "==== 检测到 GitHub Release 资产 ===="
+            echo "仓库: ${OWNER}/${REPO}"
+            echo "Tag: ${TAG}"
+            echo "目标文件: ${FILENAME}"
+
+            gh release download "${TAG}" \
+              --repo "${OWNER}/${REPO}" \
+              --pattern "${FILENAME}" \
+              --clobber
+
+            mv -f "${FILENAME}" base_image.img.gz
+          else
+            echo "==== 使用标准 curl 下载 ===="
+            curl -fSL "${RAW_URL}" -o base_image.img.gz
+          fi
+
+          echo "Decompressing gz image with pigz..."
           pigz -d base_image.img.gz
           ls -lh base_image.img
 
@@ -112,7 +140,6 @@ jobs:
 
           echo "===== 校验 idbloader raw 写入 ====="
           IDB_SIZE="$(stat -c '%s' "${SRC_IDB}")"
-
           sha256sum "${SRC_IDB}"
           sudo dd if="${DEV}" \
             bs=1 \
@@ -123,7 +150,6 @@ jobs:
 
           echo "===== 校验 U-Boot raw 写入 ====="
           UBOOT_SIZE="$(stat -c '%s' "${SRC_UBOOT}")"
-
           sha256sum "${SRC_UBOOT}"
           sudo dd if="${DEV}" \
             bs=1 \
@@ -160,6 +186,12 @@ jobs:
               sudo install -Dm0644 \
                 "${SRC_DTB}" \
                 "${TARGET_DTB_DIR}/${DTB_NAME}"
+
+              # 双保险：同名覆盖原版设备树（如果是 r5c 的 dtb）
+              for old_dtb in $(sudo find "${TARGET_DTB_DIR}" -maxdepth 1 -name "*r5c*.dtb" -o -name "*hnas*.dtb" 2>/dev/null); do
+                echo "覆盖原机型 DTB: ${old_dtb}"
+                sudo cp -fv "${SRC_DTB}" "${old_dtb}"
+              done
 
               echo "===== 校验最终 DTB ====="
               sha256sum "${SRC_DTB}"
@@ -215,6 +247,11 @@ jobs:
                 echo "fdtfile=rockchip/${DTB_NAME}" | sudo tee -a "${FNENV_CONF}" >/dev/null
               fi
 
+              # 将 verbosity 调高到 7，确保串口输出完整内核调试信息
+              if sudo grep -qE '^verbosity=' "${FNENV_CONF}"; then
+                sudo sed -i -E "s|^verbosity=.*|verbosity=7|" "${FNENV_CONF}"
+              fi
+
               sudo cat "${FNENV_CONF}"
               BOOT_CONFIG_UPDATED=true
 
@@ -228,6 +265,10 @@ jobs:
                   "${ARMBIANENV_CONF}"
               else
                 echo "fdtfile=rockchip/${DTB_NAME}" | sudo tee -a "${ARMBIANENV_CONF}" >/dev/null
+              fi
+
+              if sudo grep -qE '^verbosity=' "${ARMBIANENV_CONF}"; then
+                sudo sed -i -E "s|^verbosity=.*|verbosity=7|" "${ARMBIANENV_CONF}"
               fi
 
               sudo cat "${ARMBIANENV_CONF}"
@@ -250,7 +291,7 @@ jobs:
           }
 
           echo "✅ 自定义 idbloader、U-Boot、DTB 和启动配置均已注入并校验完成。"
-          
+
       - name: Compress Patched Image
         run: |
           TARGET_NAME="fnos_1.2.0302_${{ inputs.target_board }}_rk3568.img"
@@ -271,6 +312,6 @@ jobs:
           make_latest: true
           gh_token: ${{ secrets.GITHUB_TOKEN }}
           body: |
-            - 基于 FnOS 官方 1.2.0302 镜像重打包
+            - 基于 FnOS 官方 1.2.0302 (NanoPi-R5C / RK3568 底包) 重打包
             - 适配设备目标板卡: ${{ inputs.target_board }}
             - 注入引导: U-Boot + idbloader + 设备专用 DTB
