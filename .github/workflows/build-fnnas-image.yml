@@ -464,54 +464,57 @@ jobs:
           echo "status=success" >> ${GITHUB_OUTPUT}
 
 # 🔥🔥🔥 【开始：修正后的代码】 🔥🔥🔥
-      - name: Move Custom Bootloader Files
+      - name: Inject custom BDKJ-One bootloader and DTB
+        shell: bash
         run: |
-          echo "正在注入自定义文件 (Bootloader + DTB)..."
-          
-          # ================================================================
-          # 1. 处理 Bootloader (成功部分保持不变)
-          # ================================================================
-          TARGET_BOOT_DIR="make-fnnas/u-boot/rockchip/bdkj-bd-one"
-          mkdir -p "$TARGET_BOOT_DIR"
-          
-          # 从 my-boot 复制 (这步之前成功了)
-          cp -fv my-boot/u-boot-rk3568-bd-one.itb "$TARGET_BOOT_DIR/"
-          cp -fv my-boot/idbloader-rk3568-bd-one.img "$TARGET_BOOT_DIR/"
-          
-          # ================================================================
-          # 2. 处理 DTB 文件 (关键修改点！)
-          # ================================================================
-          
-          # ❌ 之前的错误路径:
-          # SRC_DTB="make-fnnas/fnnas-files/dtb/rockchip/rk3568-bd-one.dtb"
-          
-          # ✅ 修正后的路径 (假设你也放在了 my-boot 文件夹里):
-          SRC_DTB="my-boot/rk3568-bd-one.dtb"
-          #SRC_DTB="dtb/rk3568-bd-one.dtb"
-          
-          # 目标路径 (保持不变，这是对的)
-          TARGET_DTB_DIR="make-fnnas/fnnas-files/different-files/bdkj-bd-one/bootfs/dtb/rockchip"
-          
-          if [ -f "$SRC_DTB" ]; then
-            echo "✅ 在 my-boot 中发现 DTB 文件: $SRC_DTB"
-            echo "📂 创建专用覆盖目录: $TARGET_DTB_DIR"
-            
-            mkdir -p "$TARGET_DTB_DIR"
-            cp -fv "$SRC_DTB" "$TARGET_DTB_DIR/"
-            
-            echo "🚀 DTB 注入成功！"
-          else
-            echo "❌ 严重错误: 仍然没找到 DTB 文件！"
-            echo "请检查 my-boot 目录下是否有 rk3568-bd-one.dtb"
-            echo "当前 my-boot 目录内容:"
-            ls -lh my-boot/ || echo "my-boot 目录不存在"
-          fi
-          
-          # ================================================================
-          # 3. 最终检查
-          # ================================================================
-          echo "检查 different-files 注入结果:"
-          ls -lhR make-fnnas/fnnas-files/different-files/
+          set -euo pipefail
+
+          FNNAS_ACTION_DIR="${GITHUB_WORKSPACE}/fnnas-action"
+          SRC_DIR="${GITHUB_WORKSPACE}/my-boot"
+
+          TARGET_BOOT_DIR="${FNNAS_ACTION_DIR}/make-fnnas/u-boot/rockchip/bdkj-bd-one"
+          TARGET_DTB_DIR="${FNNAS_ACTION_DIR}/make-fnnas/fnnas-files/different-files/bdkj-bd-one/bootfs/dtb/rockchip"
+
+          UBOOT_SRC="${SRC_DIR}/u-boot-rk3568-bd-one.itb"
+          IDB_SRC="${SRC_DIR}/idbloader-rk3568-bd-one.img"
+          DTB_SRC="${SRC_DIR}/rk3568-bd-one.dtb"
+
+          for f in "${UBOOT_SRC}" "${IDB_SRC}" "${DTB_SRC}"; do
+            [[ -s "${f}" ]] || {
+              echo "错误：源文件不存在或大小为 0：${f}"
+              exit 1
+            }
+          done
+
+          mkdir -p "${TARGET_BOOT_DIR}" "${TARGET_DTB_DIR}"
+
+          # 注意：目标名必须符合 model_database.conf 对 bdkj-bd-one 的定义
+          install -Dm0644 "${UBOOT_SRC}" "${TARGET_BOOT_DIR}/u-boot.itb"
+          install -Dm0644 "${IDB_SRC}"   "${TARGET_BOOT_DIR}/idbloader.img"
+
+          # DTB 名称本来就与数据库匹配
+          install -Dm0644 "${DTB_SRC}"   "${TARGET_DTB_DIR}/rk3568-bd-one.dtb"
+
+          echo "===== 注入后文件列表 ====="
+          find "${TARGET_BOOT_DIR}" -maxdepth 1 -type f -printf '%f  %s bytes\n'
+          find "${TARGET_DTB_DIR}" -maxdepth 1 -type f -printf '%f  %s bytes\n'
+
+          echo
+          echo "===== 源文件 SHA256 ====="
+          sha256sum "${UBOOT_SRC}" "${IDB_SRC}" "${DTB_SRC}"
+
+          echo
+          echo "===== 目标文件 SHA256 ====="
+          sha256sum \
+            "${TARGET_BOOT_DIR}/u-boot.itb" \
+            "${TARGET_BOOT_DIR}/idbloader.img" \
+            "${TARGET_DTB_DIR}/rk3568-bd-one.dtb"
+
+          cmp -s "${UBOOT_SRC}" "${TARGET_BOOT_DIR}/u-boot.itb"
+          cmp -s "${IDB_SRC}" "${TARGET_BOOT_DIR}/idbloader.img"
+          cmp -s "${DTB_SRC}" "${TARGET_DTB_DIR}/rk3568-bd-one.dtb"
+
+          echo "所有自定义文件已复制完成，且二进制内容校验一致。"
 
       # 🔥🔥🔥 【结束：修正代码】 🔥🔥🔥
 
