@@ -469,14 +469,16 @@ jobs:
 
           # Create directory symlinks for packaging
           # 供 workflow workspace 与本地 FnNAS action 读取同一份基础镜像
+          # 将同一份基础镜像暴露给调用者 workspace 与本地 FnNAS action
           ln -sfn /builder/fnnas "${GITHUB_WORKSPACE}/fnnas"
           ln -sfn /builder/fnnas "${GITHUB_WORKSPACE}/fnnas-action/fnnas"
 
-          echo "===== 检查基础镜像软链接 ====="
+          echo "===== 基础镜像软链接 ====="
           ls -ld \
             "${GITHUB_WORKSPACE}/fnnas" \
             "${GITHUB_WORKSPACE}/fnnas-action/fnnas"
 
+          echo "===== 已下载的基础镜像 ====="
           find -L "${GITHUB_WORKSPACE}/fnnas" \
             -maxdepth 1 \
             -type f \
