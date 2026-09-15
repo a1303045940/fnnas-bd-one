@@ -114,17 +114,20 @@ jobs:
           mv base_image.img "${TARGET_NAME}"
           echo "Compressing with pigz..."
           pigz -9 "${TARGET_NAME}"
-          FINAL_FILE="${TARGET_NAME}.gz"
-          echo "RELEASE_FILE=${FINAL_FILE}" >> $GITHUB_ENV
-          ls -lh "${FINAL_FILE}"
-      - name: Upload to GitHub Releases
-        uses: softprops/action-gh-release@v2
+          ls -lh *.img.gz
+
+      - name: Upload packaged FnNAS to Release
+        uses: ophub/upload-to-releases@main
+        if: ${{ !cancelled() }}
         with:
-          tag_name: ${{ inputs.version_tag }}
-          name: FnNAS for ${{ inputs.target_board }} (${{ inputs.version_tag }})
-          body: "Automated repack of official FnNAS image adapted for ${{ inputs.target_board }} using custom U-Boot and DTB."
-          files: ${{ env.RELEASE_FILE }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-          body: "Automated repack of official FnNAS image adapted for ${{ inputs.target_board }} using custom U-Boot and DTB."
-          files: ${{ env.RELEASE_FILE }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ inputs.version_tag }}
+          artifacts: "*.img.gz"
+          allow_updates: true
+          remove_artifacts: false
+          replaces_artifacts: true
+          make_latest: true
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
+          body: |
+            - 基于 FnOS 官方 1.2.0302 镜像重打包
+            - 适配设备目标板卡: ${{ inputs.target_board }}
+            - 注入引导: U-Boot + idbloader + 设备专用 DTB
