@@ -6,7 +6,7 @@ on:
       image_url:
         description: "Official/Custom FnNAS Image Download URL"
         required: true
-        default: "https://github.com/a1303045940/fnnas-bd-one/releases/download/untagged-f73eae35ed6efef245e7/fnos_Mainland-PE_arm_1.2.0302_nanopi-r5c_2288.img.gz"
+        default: "https://github.com/Lemon1151/fnnas-rk35xx/releases/download/fnnas_rockchip_1.2.0302/fnos_Mainland-PE_arm_1.2.0302_dg-nas-lite_2288.img.gz"
       target_board:
         description: "Target Board Identifier"
         required: true
