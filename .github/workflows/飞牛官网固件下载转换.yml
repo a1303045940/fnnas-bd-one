@@ -1,0 +1,174 @@
+name: 飞牛官网固件下载转换
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_url:
+        description: "官网下载"
+        required: false
+        default: ""
+      target_board:
+        description: "目标设备代号 (适配板卡)"
+        required: true
+        default: "bdkj-bd-one"
+      version_tag:
+        description: "Release 标签版本"
+        required: true
+        default: "v1.2.0302-bd-one"
+
+permissions:
+  contents: write
+
+jobs:
+  repack-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Free Disk Space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
+          sudo apt-get clean
+          df -h
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pigz gzip coreutils util-linux curl grep
+
+      - name: Resolve and Download Base Image
+        run: |
+          set -e
+          INPUT_URL="${{ inputs.image_url }}"
+          TARGET_MODEL="mrkaio-m68s"
+
+          if [ -n "$INPUT_URL" ]; then
+            echo "检测到手动输入下载链接: $INPUT_URL"
+            DOWNLOAD_URL="$INPUT_URL"
+          else
+            echo "正在访问 https://fnnas.com/download-arm 检索 ${TARGET_MODEL} 最新下载地址..."
+            
+            # 抓取页面源码（附带浏览器 User-Agent）
+            PAGE_CONTENT=$(curl -fsSL -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" "https://fnnas.com/download-arm")
+
+            # 1. 直接匹配包含该型号的 .img.gz 完整下载 URL
+            DOWNLOAD_URL=$(echo "$PAGE_CONTENT" | \
+              grep -oP 'https?://[^\s"'\''<>]+' | \
+              grep "${TARGET_MODEL}" | \
+              grep '\.img\.gz' | \
+              sed 's/&amp;/\&/g' | \
+              head -n 1)
+
+            # 2. 容错：针对前端 JS 包含反斜杠转义 (https:\/\/...) 的 JSON 数据做二次提取
+            if [ -z "$DOWNLOAD_URL" ]; then
+              echo "常规匹配未命中，尝试提取 JSON 混淆链接..."
+              DOWNLOAD_URL=$(echo "$PAGE_CONTENT" | \
+                sed 's/\\//g' | \
+                grep -oP 'https?://[^\s"'\''<>]+' | \
+                grep "${TARGET_MODEL}" | \
+                grep '\.img\.gz' | \
+                sed 's/&amp;/\&/g' | \
+                head -n 1)
+            fi
+          fi
+
+          if [ -z "$DOWNLOAD_URL" ]; then
+            echo "::error::未能从官网检索到 ${TARGET_MODEL} 的有效下载链接，请确认官网结构或在触发工作流时手动传入 image_url。"
+            exit 1
+          fi
+
+          echo "解析到的下载直链: ${DOWNLOAD_URL}"
+
+          # 下载并解压
+          echo "开始下载官方镜像..."
+          curl -fSL -A "Mozilla/5.0" "${DOWNLOAD_URL}" -o base_image.img.gz
+          
+          echo "正在多线程解压镜像 (pigz)..."
+          pigz -d base_image.img.gz
+          ls -lh base_image.img
+
+      - name: Inject Custom Bootloader and DTB
+        run: |
+          set -e
+          echo "Setting up loop device..."
+          DEV=$(sudo losetup -Pf --show base_image.img)
+          echo "Mapped loop device: ${DEV}"
+
+          # 1. 写入底层引导到固化扇区
+          echo "Writing idbloader to sector 64..."
+          sudo dd if=my-boot/idbloader-rk3568-bd-one.img of="${DEV}" seek=64 bs=512 conv=notrunc
+
+          echo "Writing u-boot to sector 16384..."
+          sudo dd if=my-boot/u-boot-rk3568-bd-one.itb of="${DEV}" seek=16384 bs=512 conv=notrunc
+
+          # 2. 遍历扫描分区注入 DTB 与修改引导文件
+          sudo mkdir -p /mnt/part
+          ENV_MODIFIED=false
+
+          for PART in ${DEV}p*; do
+            [ -b "$PART" ] || continue
+            
+            if sudo mount "$PART" /mnt/part 2>/dev/null; then
+              # 替换并放置设备树
+              TARGET_DTB_DIR=$(sudo find /mnt/part -type d -path "*/dtb/rockchip" 2>/dev/null | head -n 1)
+              if [ -n "$TARGET_DTB_DIR" ]; then
+                echo "Found Rockchip DTB dir at: $TARGET_DTB_DIR"
+                sudo cp -fv dtb/rk3568-bd-one.dtb "$TARGET_DTB_DIR/"
+                
+                # 同名覆盖原有设备树（双保险）
+                if [ -f "$TARGET_DTB_DIR/rk3568-hnas.dtb" ]; then
+                  echo "Overwriting rk3568-hnas.dtb..."
+                  sudo cp -fv dtb/rk3568-bd-one.dtb "$TARGET_DTB_DIR/rk3568-hnas.dtb"
+                fi
+              fi
+
+              # 修改 fnEnv.txt 引导参数
+              ENV_FILE=$(sudo find /mnt/part -name "fnEnv.txt" 2>/dev/null | head -n 1)
+              if [ -n "$ENV_FILE" ]; then
+                echo "Found fnEnv.txt at: $ENV_FILE"
+                sudo sed -i -E "s|^fdtfile=.*|fdtfile=rockchip/rk3568-bd-one.dtb|g" "$ENV_FILE"
+                echo "Modified fnEnv.txt content:"
+                cat "$ENV_FILE"
+                ENV_MODIFIED=true
+              fi
+
+              sync
+              sudo umount /mnt/part
+            fi
+          done
+
+          sudo losetup -d "${DEV}"
+
+          if [ "$ENV_MODIFIED" = true ]; then
+            echo "✅ 引导参数及 DTB 替换完毕！"
+          else
+            echo "❌ 错误: 未能在分区中匹配并修改 fnEnv.txt！"
+            exit 1
+          fi
+
+      - name: Compress Patched Image
+        run: |
+          TARGET_NAME="fnos_1.2.0302_${{ inputs.target_board }}_rk3568.img"
+          mv base_image.img "${TARGET_NAME}"
+          echo "Compressing with pigz..."
+          pigz -9 "${TARGET_NAME}"
+          ls -lh *.img.gz
+
+      - name: Upload packaged FnNAS to Release
+        uses: ophub/upload-to-releases@main
+        if: ${{ !cancelled() }}
+        with:
+          tag: ${{ inputs.version_tag }}
+          artifacts: "*.img.gz"
+          allow_updates: true
+          remove_artifacts: false
+          replaces_artifacts: true
+          make_latest: true
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
+          body: |
+            - 基于 FnOS 官方 mrkaio-m68s 最新镜像自动解包重构
+            - 适配板卡: ${{ inputs.target_board }}
+            - 注入引导: idbloader + u-boot + 设备树 rk3568-bd-one.dtb
+            - 引导配置: 自动重定向 fnEnv.txt 指向目标设备树
